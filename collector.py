@@ -74,10 +74,12 @@ def atomic(path,value):
 
 def record(state,item):
  day=item['date'];venue=item['venue']
- path=state/'market'/f'{day}_{venue}'/'records.jsonl';path.parent.mkdir(parents=True,exist_ok=True)
+ hour=utc(item['captured_at']).strftime('%Y%m%dT%H')
+ label=f"race_{int(item['race_no']):02}" if item['kind']=='book' else 'calendar'
+ path=state/'market'/f'{day}_{venue}'/f'{label}_{hour}.jsonl.gz';path.parent.mkdir(parents=True,exist_ok=True)
  with (state/'.write.lock').open('a') as guard:
   fcntl.flock(guard,fcntl.LOCK_EX)
-  with path.open('a') as f:f.write(encode(item)+'\n')
+  with gzip.open(path,'at',encoding='utf-8') as f:f.write(encode(item)+'\n')
 
 def tick(state,cache,clock=now):
  at=clock()

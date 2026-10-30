@@ -38,6 +38,8 @@ class PublicBoundaryTests(unittest.TestCase):
    for i in range(15):
     clock[0]=start+timedelta(seconds=10*i);c.tick(state,cache,clock=lambda:clock[0])
    folder=state/'market/2027-01-01_ST';tail=json.loads((folder/'race_01_preoff_samples.json').read_text());early=json.loads((folder/'race_01_opening_samples.json').read_text())
+   archives=list(folder.glob('race_01_*.jsonl.gz'));self.assertEqual(len(archives),1)
+   with c.gzip.open(archives[0],'rt',encoding='utf-8') as f:self.assertEqual(len(f.readlines()),15)
    self.assertEqual(len(tail),12);self.assertEqual(len(early),1);self.assertEqual(early[0]['captured_at'],start.isoformat());self.assertEqual(tail[-1]['captured_at'],clock[0].isoformat())
  def test_no_redirect(self):
   with self.assertRaises(ValueError):c.NoRedirect().redirect_request(None,None,None,None,None,None)
