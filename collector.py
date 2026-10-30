@@ -98,7 +98,18 @@ def tick(state,cache,clock=now):
     pools=[clean_pool(p,m,r) for p in ms[0].get('pmPools') or [] if p.get('oddsType') in ['WIN','PLA','QIN','DBL']]
     if len({p['kind'] for p in pools})!=len(pools):raise ValueError('duplicate pool')
     entry={'schema':SCHEMA,'kind':'book','date':m['date'],'venue':m['venue'],'race_no':r['no'],'captured_at':captured.isoformat(),'recorded_at':clock().isoformat(),'meeting_id':m['id'],'race':r,'pools':pools,'source_sha256':sha(data),'collector_commit':os.environ.get('GITHUB_SHA','local'),'source_run_id':os.environ.get('GITHUB_RUN_ID','local')}
-    record(state,entry);atomic(state/'market'/f"{m['date']}_{m['venue']}"/f"race_{r['no']:02}_latest.json",entry);count+=1
+    record(state,entry)
+    folder=state/'market'/f"{m['date']}_{m['venue']}"
+    atomic(folder/f"race_{r['no']:02}_latest.json",entry)
+    # Public transport indexes: 5-minute opening samples and last 12 preoff captures.
+    # These are raw observations; no private thresholds, models or decisions.
+    sample=folder/f"race_{r['no']:02}_opening_samples.json"
+    prior=json.loads(sample.read_text()) if sample.exists() else []
+    if not prior or (captured-utc(prior[-1]['captured_at'])).total_seconds()>=300:
+     atomic(sample,(prior+[entry])[-24:])
+    tail=folder/f"race_{r['no']:02}_preoff_samples.json"
+    prior=json.loads(tail.read_text()) if tail.exists() else []
+    atomic(tail,(prior+[entry])[-12:]);count+=1
    except Exception:
     cache['source_errors']=cache.get('source_errors',0)+1 # Never echo remote response or request headers.
  atomic(state/'heartbeat.json',{'schema':SCHEMA,'checked_at':clock().isoformat(),'books_this_tick':count,'source_errors':cache.get('source_errors',0),'collector_commit':os.environ.get('GITHUB_SHA','local'),'source_run_id':os.environ.get('GITHUB_RUN_ID','local')})

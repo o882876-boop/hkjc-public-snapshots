@@ -28,6 +28,17 @@ class PublicBoundaryTests(unittest.TestCase):
  def test_offday_tick_only_calendar(self):
   with tempfile.TemporaryDirectory() as d,patch.object(c,'graphql',return_value={'raceMeetings':[self.meeting()]}) as api:
    n=c.tick(Path(d),{},clock=lambda:datetime(2026,12,31,tzinfo=timezone.utc));self.assertEqual(n,0);self.assertEqual(api.call_count,1);self.assertFalse((Path(d)/'market').exists())
+ def test_transport_indexes_keep_actual_timestamps_and_bounded_tail(self):
+  start=datetime(2027,1,1,4,40,tzinfo=timezone.utc);clock=[start];m=self.meeting()
+  def api(name,v):
+   if name=='calendar':return {'raceMeetings':[m]}
+   no=v['raceNo'];return {'raceMeetings':[{'pmPools':[{'id':m['id']+'WIN'+str(no),'oddsType':'WIN','leg':{'races':[no]},'oddsLastUpdateTime':clock[0].isoformat(),'status':'PREBET','sellStatus':'START_SELL','oddsNodes':[{'combString':'1','oddsValue':'5'}]}]}]}
+  with tempfile.TemporaryDirectory() as d,patch.object(c,'graphql',side_effect=api):
+   cache={};state=Path(d)
+   for i in range(15):
+    clock[0]=start+timedelta(seconds=10*i);c.tick(state,cache,clock=lambda:clock[0])
+   folder=state/'market/2027-01-01_ST';tail=json.loads((folder/'race_01_preoff_samples.json').read_text());early=json.loads((folder/'race_01_opening_samples.json').read_text())
+   self.assertEqual(len(tail),12);self.assertEqual(len(early),1);self.assertEqual(early[0]['captured_at'],start.isoformat());self.assertEqual(tail[-1]['captured_at'],clock[0].isoformat())
  def test_no_redirect(self):
   with self.assertRaises(ValueError):c.NoRedirect().redirect_request(None,None,None,None,None,None)
  def test_public_source_export_file_allowlist(self):
