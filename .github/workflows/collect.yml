@@ -5,7 +5,7 @@ on:
     paths: ['collector.py', 'publish.py', 'test_collector.py', 'queries/**', '.github/workflows/collect.yml']
   workflow_dispatch:
   schedule:
-    - cron: '23 1-15 * * *'
+    - cron: '13,33,53 1-15 * * *'
 permissions:
   contents: read
 concurrency:
