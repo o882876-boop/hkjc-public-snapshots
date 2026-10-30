@@ -1,0 +1,113 @@
+name: Public market recorder
+on:
+  push:
+    branches: [main]
+    paths: ['collector.py', 'publish.py', 'test_collector.py', 'queries/**', '.github/workflows/collect.yml']
+  workflow_dispatch:
+  schedule:
+    - cron: '23 1-15 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: public-market-recorder
+  cancel-in-progress: false
+jobs:
+  gate:
+    if: github.repository == 'o882876-boop/hkjc-public-snapshots' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      eligible: ${{ steps.plan.outputs.eligible }}
+      phase1_until: ${{ steps.plan.outputs.phase1_until }}
+      phase2_until: ${{ steps.plan.outputs.phase2_until }}
+    env:
+      STATE_DIR: /tmp/public-market-state
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify public field boundaries
+        run: python3 -m unittest discover -p 'test_*.py' -v
+      - name: Remove initial personal author metadata from this new source branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 publish.py clean-initial-history
+      - name: Restore public observations only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 publish.py restore --state "$STATE_DIR"
+      - name: Probe fixed official source
+        run: python3 collector.py probe --state "$STATE_DIR"
+      - id: plan
+        run: python3 collector.py plan --state "$STATE_DIR"
+      - name: Persist public heartbeat and calendar
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 publish.py publish --state "$STATE_DIR"
+  phase1:
+    needs: gate
+    if: needs.gate.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: write
+    env:
+      STATE_DIR: /tmp/public-market-state
+      UNTIL: ${{ needs.gate.outputs.phase1_until }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Restore public state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 publish.py restore --state "$STATE_DIR"
+      - name: Record public data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (while sleep 15; do python3 publish.py publish --state "$STATE_DIR" || true; done) &
+          backup_pid=$!
+          trap 'kill "$backup_pid" 2>/dev/null || true; wait "$backup_pid" 2>/dev/null || true' EXIT
+          env -u GH_TOKEN python3 -u collector.py watch --state "$STATE_DIR" --until "$UNTIL"
+      - name: Save public state
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 publish.py publish --state "$STATE_DIR"
+  phase2:
+    needs: [gate, phase1]
+    if: needs.gate.outputs.eligible == 'true' && needs.phase1.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: write
+    env:
+      STATE_DIR: /tmp/public-market-state
+      UNTIL: ${{ needs.gate.outputs.phase2_until }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Restore public state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 publish.py restore --state "$STATE_DIR"
+      - name: Record public data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (while sleep 15; do python3 publish.py publish --state "$STATE_DIR" || true; done) &
+          backup_pid=$!
+          trap 'kill "$backup_pid" 2>/dev/null || true; wait "$backup_pid" 2>/dev/null || true' EXIT
+          env -u GH_TOKEN python3 -u collector.py watch --state "$STATE_DIR" --until "$UNTIL"
+      - run: python3 collector.py complete --state "$STATE_DIR"
+      - name: Save public state
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 publish.py publish --state "$STATE_DIR"
