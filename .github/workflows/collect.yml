@@ -4,6 +4,11 @@ on:
     branches: [main]
     paths: ['collector.py', 'publish.py', 'test_collector.py', 'queries/**', '.github/workflows/collect.yml']
   workflow_dispatch:
+    inputs:
+      stop_sell_probe_minutes:
+        description: 'TEST ONLY: minutes after scheduled post to poll the WIN pool for first not-selling observation (0 = off, max 10)'
+        required: false
+        default: '0'
   schedule:
     - cron: '13,33,53 1-15 * * *'
 permissions:
@@ -58,6 +63,7 @@ jobs:
     env:
       STATE_DIR: /tmp/public-market-state
       UNTIL: ${{ needs.gate.outputs.phase1_until }}
+      STOP_SELL_PROBE_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.stop_sell_probe_minutes || '0' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -89,6 +95,7 @@ jobs:
     env:
       STATE_DIR: /tmp/public-market-state
       UNTIL: ${{ needs.gate.outputs.phase2_until }}
+      STOP_SELL_PROBE_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.stop_sell_probe_minutes || '0' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
