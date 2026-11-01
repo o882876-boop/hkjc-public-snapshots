@@ -1,0 +1,35 @@
+name: Public recorder watchdog
+# Read-only alert: fails (visible run failure + step summary) when an official ST/HV meeting is in its collection
+# window but the recorder has not started or its public heartbeat is stale. It never writes data, never starts or
+# restarts the recorder, and exits quickly outside meeting windows.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '3,23,43 1-15 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: public-recorder-watchdog
+  cancel-in-progress: true
+jobs:
+  watchdog:
+    if: github.repository == 'o882876-boop/hkjc-public-snapshots' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      STATE_DIR: /tmp/public-market-state
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify public field boundaries
+        run: python3 -m unittest discover -p 'test_*.py'
+      - name: Read the two small public state files only (read-only)
+        run: |
+          mkdir -p "$STATE_DIR"
+          for f in heartbeat.json session.json; do
+            curl -fsS --max-time 20 "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/public-data/$f" -o "$STATE_DIR/$f" || echo "missing $f"
+          done
+      - name: Check recorder start and heartbeat
+        run: python3 collector.py watchdog --state "$STATE_DIR"

@@ -69,13 +69,41 @@ def clean_pool(p,m,r):
  published=utc(at).isoformat() if at else None
  return {'id':p['id'],'kind':k,'legs':legs,'published_at':published,'status':str(p.get('status',''))[:30],'sell_status':str(p.get('sellStatus',''))[:30],'nodes':[node(n) for n in p.get('oddsNodes') or []]}
 
+def win_summary(pools,race):
+ """Descriptive WIN book completeness: counts, inverse-quote sum and explicit missing reasons. Observation only.
+ complete = WIN pool selling and every active (non-scratched) runner has a numeric quote 1<q<999 and no quoted
+ runner is outside the active roster. Markers on scratched runners (e.g. SCR) are informational only."""
+ win=[p for p in pools if p['kind']=='WIN']
+ active={int(h['no']) for h in race.get('runners',[]) if str(h.get('status','')).upper() not in ['SCRATCHED','WITHDRAWN','SCR']}
+ out={'declared_runners':len(race.get('runners',[])),'active_runners':len(active),'win_nodes':0,'win_valid':0,'inverse_sum':None,'complete':False,'missing_reasons':[],'info':[]}
+ if not win:out['missing_reasons'].append('no_win_pool');return out
+ p=win[0];reasons=set();info=set();valid={}
+ if p.get('sell_status')!='START_SELL':reasons.add('pool_not_selling')
+ for n in p.get('nodes',[]):
+  try:no=int(str(n['combString']).strip())
+  except ValueError:reasons.add('unparsable_runner_number');continue
+  v=str(n.get('oddsValue','')).strip()
+  try:q=float(v)
+  except ValueError:
+   (reasons if no in active else info).add(('non_numeric_quote:' if no in active else 'scratched_runner_marker:')+(v[:12] or 'blank'));continue
+  if q>=999:(reasons if no in active else info).add('capped_999')
+  elif q<=1:reasons.add('quote_not_above_1')
+  else:valid[no]=q
+ out['win_nodes']=len(p.get('nodes',[]));out['win_valid']=len(valid)
+ if active-set(valid):reasons.add('active_runner_without_valid_quote')
+ if set(valid)-active:reasons.add('quoted_runner_not_active')
+ act=[q for no,q in valid.items() if no in active]
+ if act:out['inverse_sum']=round(sum(1/q for q in act),6)
+ out['complete']=bool(active) and active<=set(valid) and not reasons
+ out['missing_reasons']=sorted(reasons);out['info']=sorted(info);return out
+
 def atomic(path,value):
  path.parent.mkdir(parents=True,exist_ok=True);temp=path.with_suffix('.tmp');temp.write_text(encode(value));os.replace(temp,path)
 
 def record(state,item):
  day=item['date'];venue=item['venue']
  hour=utc(item['captured_at']).strftime('%Y%m%dT%H')
- label=f"race_{int(item['race_no']):02}" if item['kind']=='book' else 'calendar'
+ label=f"race_{int(item['race_no']):02}" if item['kind']=='book' else (f"poolstate_race_{int(item['race_no']):02}" if item['kind']=='pool_state' else 'calendar')
  path=state/'market'/f'{day}_{venue}'/f'{label}_{hour}.jsonl.gz';path.parent.mkdir(parents=True,exist_ok=True)
  with (state/'.write.lock').open('a') as guard:
   fcntl.flock(guard,fcntl.LOCK_EX)
@@ -99,7 +127,7 @@ def tick(state,cache,clock=now):
     if len(ms)!=1:raise ValueError('ambiguous source')
     pools=[clean_pool(p,m,r) for p in ms[0].get('pmPools') or [] if p.get('oddsType') in ['WIN','PLA','QIN','DBL']]
     if len({p['kind'] for p in pools})!=len(pools):raise ValueError('duplicate pool')
-    entry={'schema':SCHEMA,'kind':'book','date':m['date'],'venue':m['venue'],'race_no':r['no'],'captured_at':captured.isoformat(),'recorded_at':clock().isoformat(),'meeting_id':m['id'],'race':r,'pools':pools,'source_sha256':sha(data),'collector_commit':os.environ.get('GITHUB_SHA','local'),'source_run_id':os.environ.get('GITHUB_RUN_ID','local')}
+    entry={'schema':SCHEMA,'kind':'book','date':m['date'],'venue':m['venue'],'race_no':r['no'],'captured_at':captured.isoformat(),'recorded_at':clock().isoformat(),'meeting_id':m['id'],'race':r,'pools':pools,'win_summary':win_summary(pools,r),'source_sha256':sha(data),'collector_commit':os.environ.get('GITHUB_SHA','local'),'source_run_id':os.environ.get('GITHUB_RUN_ID','local')}
     record(state,entry)
     folder=state/'market'/f"{m['date']}_{m['venue']}"
     atomic(folder/f"race_{r['no']:02}_latest.json",entry)
@@ -114,8 +142,45 @@ def tick(state,cache,clock=now):
     atomic(tail,(prior+[entry])[-12:]);count+=1
    except Exception:
     cache['source_errors']=cache.get('source_errors',0)+1 # Never echo remote response or request headers.
- atomic(state/'heartbeat.json',{'schema':SCHEMA,'checked_at':clock().isoformat(),'books_this_tick':count,'source_errors':cache.get('source_errors',0),'collector_commit':os.environ.get('GITHUB_SHA','local'),'source_run_id':os.environ.get('GITHUB_RUN_ID','local')})
+ probe=probe_stop_sell(state,cache,clock) if probe_minutes()>0 else 0
+ atomic(state/'heartbeat.json',{'schema':SCHEMA,'checked_at':clock().isoformat(),'books_this_tick':count,'source_errors':cache.get('source_errors',0),'probe_requests_total':cache.get('probe_requests',0),'collector_commit':os.environ.get('GITHUB_SHA','local'),'source_run_id':os.environ.get('GITHUB_RUN_ID','local')})
  return count
+
+def probe_minutes():
+ """Stop-sell probe window after the scheduled post; 0 (default) disables it. Capped at 10 minutes."""
+ try:return max(0,min(10,int(os.environ.get('STOP_SELL_PROBE_MINUTES','0') or 0)))
+ except ValueError:return 0
+
+def probe_stop_sell(state,cache,clock=now):
+ """Opt-in test: after the scheduled post, poll the WIN pool only until it is first seen not selling.
+ Records first_not_selling_seen_at (an UPPER bound for the pool close, limited by poll spacing) and the last time
+ it was still seen selling. Neither is the actual race off time. Written to poolstate files only."""
+ n=0;limit=probe_minutes()*60
+ for m in cache.get('meetings',[]):
+  if m['date']!=clock().astimezone(ZoneInfo('Asia/Hong_Kong')).date().isoformat():continue
+  for r in m['races']:
+   sec=(clock()-utc(r['post'])).total_seconds()
+   if not 0<=sec<=limit or r['status'] in ['VOID','CANCELLED']:continue
+   path=state/'market'/f"{m['date']}_{m['venue']}"/f"race_{r['no']:02}_pool_state.json"
+   summary=json.loads(path.read_text()) if path.exists() else {'schema':SCHEMA,'kind':'pool_state_summary','date':m['date'],'venue':m['venue'],'race_no':r['no'],'scheduled_post':r['post'],
+    'note':'first_not_selling_seen_at is the first poll that saw the WIN pool not selling; it is NOT the actual off time','probe_requests':0,'last_selling_seen_at':None,'first_not_selling_seen_at':None}
+   if summary['first_not_selling_seen_at']:continue
+   try:
+    data=graphql('pools',{'date':m['date'],'venueCode':m['venue'],'raceNo':r['no'],'oddsTypes':['WIN']});captured=clock();n+=1
+    cache['probe_requests']=cache.get('probe_requests',0)+1;summary['probe_requests']+=1
+    ms=data.get('raceMeetings') or []
+    if len(ms)!=1:raise ValueError('ambiguous source')
+    win=[clean_pool(p,m,r) for p in ms[0].get('pmPools') or [] if p.get('oddsType')=='WIN']
+    sell=win[0]['sell_status'] if win else 'NO_WIN_POOL'
+    record(state,{'schema':SCHEMA,'kind':'pool_state','date':m['date'],'venue':m['venue'],'race_no':r['no'],'meeting_id':m['id'],'scheduled_post':r['post'],
+     'captured_at':captured.isoformat(),'seconds_after_scheduled_post':round(sec,3),'win_status':win[0]['status'] if win else None,'win_sell_status':sell,
+     'win_published_at':win[0]['published_at'] if win else None,'collector_commit':os.environ.get('GITHUB_SHA','local'),'source_run_id':os.environ.get('GITHUB_RUN_ID','local')})
+    if sell=='START_SELL':summary['last_selling_seen_at']=captured.isoformat()
+    else:summary['first_not_selling_seen_at']=captured.isoformat();summary['first_not_selling_status']=sell
+    atomic(path,summary)
+   except Exception:
+    cache['probe_errors']=cache.get('probe_errors',0)+1
+ return n
 
 def plan(meetings,at,done):
  today=at.astimezone(ZoneInfo('Asia/Hong_Kong')).date().isoformat()
@@ -132,8 +197,26 @@ def plan(meetings,at,done):
   return {'eligible':True,'meeting_id':m['id'],'phase1_until':cut.isoformat(),'phase2_until':end.isoformat()}
  return {'eligible':False,'checked_at':at.isoformat()}
 
+def watchdog(state,meetings,at,stale_minutes=5,lead_minutes=100):
+ """Alert when a meeting is in its collection window but the recorder has not started or its heartbeat is stale.
+ Pure function of public state + official calendar; returns (ok, findings)."""
+ today=at.astimezone(ZoneInfo('Asia/Hong_Kong')).date().isoformat();findings=[]
+ for m in meetings:
+  posts=sorted(utc(r['post']) for r in m['races'] if r['status'] not in ['VOID','CANCELLED'])
+  if m['date']!=today or not posts:continue
+  start=posts[0]-timedelta(minutes=lead_minutes);end=posts[-1]+timedelta(minutes=5)
+  if not start<=at<end:findings.append({'meeting':m['id'],'status':'outside_window'});continue
+  hb=json.loads((state/'heartbeat.json').read_text()) if (state/'heartbeat.json').exists() else None
+  ss=json.loads((state/'session.json').read_text()) if (state/'session.json').exists() else None
+  age=(at-utc(hb['checked_at'])).total_seconds()/60 if hb and hb.get('checked_at') else None
+  started=bool(ss and ss.get('meeting_id')==m['id'] and ss.get('eligible'))
+  if not started:findings.append({'meeting':m['id'],'status':'ALERT_recorder_not_started','first_post':posts[0].isoformat()})
+  elif age is None or age>stale_minutes:findings.append({'meeting':m['id'],'status':'ALERT_heartbeat_stale','heartbeat_age_minutes':None if age is None else round(age,1)})
+  else:findings.append({'meeting':m['id'],'status':'ok','heartbeat_age_minutes':round(age,1)})
+ return not any(f['status'].startswith('ALERT') for f in findings),findings
+
 def main():
- p=argparse.ArgumentParser();p.add_argument('action',choices=['probe','plan','watch','complete']);p.add_argument('--state',default='state');p.add_argument('--until');a=p.parse_args();state=Path(a.state);state.mkdir(parents=True,exist_ok=True)
+ p=argparse.ArgumentParser();p.add_argument('action',choices=['probe','plan','watch','complete','watchdog']);p.add_argument('--state',default='state');p.add_argument('--until');a=p.parse_args();state=Path(a.state);state.mkdir(parents=True,exist_ok=True)
  if a.action=='plan':
   m=calendar(graphql('calendar',{'date':None,'venueCode':None}));done=json.loads((state/'completed.json').read_text()) if (state/'completed.json').exists() else {};result=plan(m,now(),done)
   atomic(state/'session.json',result)
@@ -141,6 +224,13 @@ def main():
    with open(os.environ['GITHUB_OUTPUT'],'a') as f:
     for k in ['eligible','phase1_until','phase2_until']:f.write(k+'='+str(result.get(k,'')).lower()+'\n' if k=='eligible' else k+'='+str(result.get(k,''))+'\n')
   print(encode(result));return
+ if a.action=='watchdog':
+  m=calendar(graphql('calendar',{'date':None,'venueCode':None}));ok,findings=watchdog(state,m,now())
+  print(encode({'ok':ok,'checked_at':now().isoformat(),'findings':findings}))
+  if os.environ.get('GITHUB_STEP_SUMMARY'):
+   with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:f.write('Public recorder watchdog: '+('ok' if ok else 'ALERT')+'\n\n'+encode(findings)+'\n')
+  if not ok:raise SystemExit(1)
+  return
  if a.action=='complete':
   result=json.loads((state/'session.json').read_text())
   if now()<utc(result['phase2_until'])-timedelta(seconds=20):raise ValueError('session still active')

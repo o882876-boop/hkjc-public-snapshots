@@ -11,3 +11,5 @@ Only official public market data and a standalone recorder belong here. There ar
 - Public means files, logs and data may be copied indefinitely. No claim of perfect secrecy, uninterrupted execution, or guaranteed zero storage costs is made.
 
 Keep private analytics in a separate private environment that reads public data as data only. Do not download and execute this repository's code inside a privileged private workflow. Validate schema, identifiers, timestamps and pool state before analysis; never backfill a live decision from later data.
+
+The watchdog workflow has read-only repository permission, downloads two public JSON files and the official calendar, and has no write step. The optional stop-sell probe uses the same fixed endpoint and field allowlist and is disabled unless a maintainer starts a manual run with a non-zero value.
